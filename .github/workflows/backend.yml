@@ -1,0 +1,95 @@
+name: Backend CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  backend-ci:
+    name: backend-ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+      - name: Check JavaScript syntax
+        working-directory: backend
+        run: node --check src/server.js
+      - name: Build container image
+        run: docker build --tag cloudops-todo-backend:ci ./backend
+
+  backend-deploy:
+    name: backend-deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.created == false
+    needs: backend-ci
+    runs-on: ubuntu-latest
+    environment: production-backend
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ap-southeast-2
+      AWS_ACCOUNT_ID: '201820368612'
+      ECR_REPOSITORY: cloudops-todo-backend
+      ECS_CLUSTER: cloudops-todo-cluster
+      ECS_SERVICE: cloudops-todo-backend
+      TASK_DEFINITION_FAMILY: cloudops-todo-backend
+      CONTAINER_NAME: backend
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Configure AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_BACKEND }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Sign in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push immutable commit image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          docker build --tag "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" ./backend
+          docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      - name: Update ECS task definition and service
+        env:
+          IMAGE_URI: ${{ steps.ecr.outputs.registry }}/cloudops-todo-backend:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          aws ecs describe-task-definition --task-definition "$TASK_DEFINITION_FAMILY" \
+            --query taskDefinition --output json > task-definition-source.json
+          jq --arg image "$IMAGE_URI" --arg name "$CONTAINER_NAME" '
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
+            | .containerDefinitions |= map(if .name == $name then .image = $image else . end)
+          ' task-definition-source.json > task-definition.json
+          if ! jq -e --arg name "$CONTAINER_NAME" '.containerDefinitions | any(.name == $name)' task-definition.json >/dev/null; then
+            echo "Container $CONTAINER_NAME is missing from task definition" >&2
+            exit 1
+          fi
+          TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://task-definition.json \
+            --query taskDefinition.taskDefinitionArn --output text)
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "$TASK_DEFINITION_ARN" >/dev/null
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+
+

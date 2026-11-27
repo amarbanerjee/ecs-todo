@@ -1,0 +1,5 @@
+# Require Amar Banerjee's review for application and deployment changes.
+/frontend/ @amarbanerjee
+/backend/ @amarbanerjee
+/.github/ @amarbanerjee
+/deploy/ @amarbanerjee
