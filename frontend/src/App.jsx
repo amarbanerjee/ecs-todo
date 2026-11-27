@@ -48,7 +48,7 @@ export default function App() {
 
   return <main className="shell">
     <section className="card">
-      <p className="eyebrow">CLOUDOPS • LEARNING PROJECT</p>
+      <p className="eyebrow">AWS • LEARNING PROJECT</p>
       <h1>My To-Do List</h1>
       <p className="subtitle">Plan your work. Track your progress.</p>
       <form onSubmit={addTodo} className="add-form">
